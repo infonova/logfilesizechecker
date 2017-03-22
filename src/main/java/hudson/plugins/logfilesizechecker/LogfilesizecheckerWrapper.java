@@ -2,22 +2,21 @@ package hudson.plugins.logfilesizechecker;
 
 import hudson.Extension;
 import hudson.Launcher;
-import hudson.model.AbstractBuild;
-import hudson.model.AbstractProject;
-import hudson.model.BuildListener;
-import hudson.model.Descriptor;
-import hudson.model.Executor;
-import hudson.model.Result;
+import hudson.model.*;
 import hudson.tasks.BuildWrapper;
 import hudson.tasks.BuildWrapperDescriptor;
 import hudson.triggers.SafeTimerTask;
 import hudson.triggers.Trigger;
+import hudson.util.FormValidation;
+import jenkins.model.CauseOfInterruption;
+import jenkins.model.Jenkins;
+import net.sf.json.JSONObject;
+import org.kohsuke.stapler.DataBoundConstructor;
+import org.kohsuke.stapler.QueryParameter;
+import org.kohsuke.stapler.StaplerRequest;
+import org.kohsuke.stapler.interceptor.RequirePOST;
 
 import java.io.IOException;
-import net.sf.json.JSONObject;
-
-import org.kohsuke.stapler.DataBoundConstructor;
-import org.kohsuke.stapler.StaplerRequest;
 
 /**
  * {@link BuildWrapper} that terminates a build if its log file size is too big.
@@ -25,6 +24,20 @@ import org.kohsuke.stapler.StaplerRequest;
  * @author Stefan Brausch
  */
 public class LogfilesizecheckerWrapper extends BuildWrapper {
+
+    public static class MaxLogFileSizeReached extends CauseOfInterruption {
+
+        private final long logFileSize;
+
+        MaxLogFileSizeReached(long logFileSize) {
+            this.logFileSize = logFileSize;
+        }
+
+        @Override
+        public String getShortDescription() {
+            return "Aborting the build because max log file size was reached (size: " + logFileSize + ")";
+        }
+    }
     
     /** Set your own max size instaed of using the default.*/
     public boolean setOwn;
@@ -66,6 +79,23 @@ public class LogfilesizecheckerWrapper extends BuildWrapper {
             private final LogSizeTimerTask logtask;
             private final int allowedLogSize;
 
+            /**
+             * Constructor for Environment of BuildWrapper
+             * Finds correct maximum log size and starts timertask
+             */
+            public EnvironmentImpl() {
+                if (setOwn) {
+                    allowedLogSize = maxLogSize;
+                } else {
+                    allowedLogSize = getDescriptorImpl().getGlobalMaxLogSize();
+                }
+
+                logtask = new LogSizeTimerTask(build, listener);
+                if (allowedLogSize > 0) {
+                    Trigger.timer.scheduleAtFixedRate(logtask, DELAY, PERIOD);
+                }
+            }
+
             /**TimerTask that checks log file size in regular intervals.*/
             final class LogSizeTimerTask extends SafeTimerTask {
                 private final AbstractBuild build;
@@ -87,27 +117,11 @@ public class LogfilesizecheckerWrapper extends BuildWrapper {
                     if (e != null 
                             && build.getLogFile().length() > allowedLogSize * MB 
                             && !e.isInterrupted()) {
-                        listener.getLogger().println(
-                                ">>> Max Log Size reached. Aborting <<<");
-                        e.interrupt(failBuild ? Result.FAILURE : Result.ABORTED);
+
+                        CauseOfInterruption causeOfInterruption = new MaxLogFileSizeReached(build.getLogFile().length());
+                        listener.getLogger().println(causeOfInterruption.getShortDescription());
+                        e.interrupt(failBuild ? Result.FAILURE : Result.ABORTED, causeOfInterruption);
                     }
-                }
-            }
-            
-            /**
-             * Constructor for Environment of BuildWrapper
-             * Finds correct maximum log size and starts timertask
-             */
-            public EnvironmentImpl() {
-                if (setOwn) {
-                    allowedLogSize = maxLogSize;
-                } else {
-                    allowedLogSize = DESCRIPTOR.getDefaultLogSize();
-                }
-                
-                logtask = new LogSizeTimerTask(build, listener);
-                if (allowedLogSize > 0) {
-                    Trigger.timer.scheduleAtFixedRate(logtask, DELAY, PERIOD);
                 }
             }
 
@@ -117,7 +131,6 @@ public class LogfilesizecheckerWrapper extends BuildWrapper {
                 if (allowedLogSize > 0) {
                     logtask.cancel();
                 }
-                listener.getLogger().println("erreicht: " + build.getLogFile().length());
                 return true;
             }
         }
@@ -126,25 +139,27 @@ public class LogfilesizecheckerWrapper extends BuildWrapper {
                 "Executor: " + build.getExecutor().getNumber());
         return new EnvironmentImpl();
     }
-    
 
     @Override
     public Descriptor<BuildWrapper> getDescriptor() {
-        return DESCRIPTOR;
+        return Jenkins.getInstance().getDescriptorOrDie(getClass());
     }
 
-    /**Creates descriptor for the BuildWrapper.*/
-    @Extension
-    public static final DescriptorImpl DESCRIPTOR = new DescriptorImpl();
+    private DescriptorImpl getDescriptorImpl() {
+        return ((DescriptorImpl)getDescriptor());
+    }
 
     /**The Descriptor for the BuildWrapper.*/
+    @Extension
     public static final class DescriptorImpl extends BuildWrapperDescriptor {
 
+        public static final int DEFAULT_GLOBAL_MAX_LOG_SIZE = 0;
+
         /**If there is no job specific size set, this will be used.*/
-        private int defaultLogSize;
+        private int globalMaxLogSize;
 
         /**Constructor loads previously saved form data.*/
-        DescriptorImpl() {
+        public DescriptorImpl() {
             super(LogfilesizecheckerWrapper.class);
             load();
         }
@@ -155,7 +170,6 @@ public class LogfilesizecheckerWrapper extends BuildWrapper {
          */
         public String getDisplayName() {
             return Messages.Descriptor_DisplayName();
-//            return "Abort the build if its log file size is too big";
         }
 
         /**Certainly does something.
@@ -168,33 +182,25 @@ public class LogfilesizecheckerWrapper extends BuildWrapper {
 
         /**
          * Returns maximum log size set in global configuration.
-         * @return the globally set max log size
+         * @return the global max log size
          */
-        public int getDefaultLogSize() {
-            return defaultLogSize;
+        public int getGlobalMaxLogSize() {
+            return globalMaxLogSize;
         }
 
         /**
          * Allows changing the global log file size - used for testing only.
-         * @param size new default max log size
+         * @param globalMaxLogSize new global max log size
          */
-        public void setDefaultLogSize(int size) {
-            defaultLogSize = size;
+        public void setGlobalMaxLogSize(int globalMaxLogSize) {
+            this.globalMaxLogSize = globalMaxLogSize;
         }
 
-        /**
-         * 
-         * 
-         * {@inheritDoc}
-         */
+        @Override
+        @RequirePOST
         public boolean configure(StaplerRequest req, JSONObject formData) throws FormException {
-            final String size = formData.getString("defaultLogSize");
+            globalMaxLogSize = checkGlobalMaxLogSize(formData.getInt("globalMaxLogSize"));
 
-            if (size != null) {
-                defaultLogSize = Integer.parseInt(size);
-            } else {
-                defaultLogSize = 0;
-            }
             save();
             return super.configure(req, formData);
         }
@@ -215,6 +221,26 @@ public class LogfilesizecheckerWrapper extends BuildWrapper {
             }
             
             return super.newInstance(req, newData);
+        }
+
+        private Integer checkGlobalMaxLogSize(Integer globalMaxLogSize) throws Failure {
+            if (globalMaxLogSize == null) {
+                throw new Failure("Please specify a max log file size");
+            } else if (globalMaxLogSize < 0) {
+                throw new Failure("Please specify a positive value for max log file size");
+            }
+
+            return globalMaxLogSize;
+        }
+
+        @SuppressWarnings("unused")
+        public FormValidation doCheckGlobalMaxLogSize(@QueryParameter Integer globalMaxLogSize) {
+            try {
+                checkGlobalMaxLogSize(globalMaxLogSize);
+                return FormValidation.ok();
+            } catch (Failure e) {
+                return FormValidation.error(e.getMessage());
+            }
         }
     }
 }

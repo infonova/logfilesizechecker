@@ -64,7 +64,7 @@ public class LogfilesizecheckerWrapperIntegrationTest extends HudsonTestCase {
         //maxLogSize=0MB, failBuild=true, setOwn=false, defaultLogSize=1
         final FreeStyleProject project = (FreeStyleProject) hudson.getItem("1");
         final LogfilesizecheckerWrapper buildWrapper = new LogfilesizecheckerWrapper(0, true, false);
-        ((LogfilesizecheckerWrapper.DescriptorImpl) buildWrapper.getDescriptor()).setDefaultLogSize(1);
+        ((LogfilesizecheckerWrapper.DescriptorImpl) buildWrapper.getDescriptor()).setGlobalMaxLogSize(1);
         project.getBuildWrappersList().add(buildWrapper);
 
         final FreeStyleBuild build = project.scheduleBuild2(0).get();
